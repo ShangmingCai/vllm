@@ -223,11 +223,11 @@ class Top1Proposer(SpeculativeProposer):
                                          -1,
                                          dtype=torch.long,
                                          device=self._device)
-            proposal_probs = torch.zeros((batch_size,
-                                          proposal_len,
-                                          self._vocab_size),
-                                         dtype=torch.float32,
-                                         device=self._device)
+            proposal_probs = torch.tensor(0,
+                                          dtype=torch.float32,
+                                          device=self._device).expand(
+                                              batch_size, proposal_len,
+                                              self._vocab_size)
             proposal_lens_tensor = torch.zeros(len(proposal_lens),
                                                dtype=torch.long,
                                                device=self._device)
