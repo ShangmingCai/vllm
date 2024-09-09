@@ -5,6 +5,7 @@ from typing import Iterator, List, Optional, Tuple
 import torch
 
 from vllm import SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
                            SequenceData, SequenceGroupMetadata,
@@ -315,6 +316,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # this also controls whether the probs get modified in the sampler
         # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
+        target_lora_request = input_seq_group_metadata.lora_request
         non_bonus_sampling_params = DEFAULT_SIMPLE_SAMPLING_PARAMS \
             if sampling_params.temperature else sampling_params
 
@@ -330,6 +332,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                     next(target_seq_ids_iter),
                     token_ids,
                     sampling_params=target_sampling_params,
+                    lora_request=target_lora_request,
                 ))
 
         return target_seq_group_metadata_list
@@ -341,6 +344,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_seq_id: TargetSeqId,
         token_ids: List[TokenId],
         sampling_params: SamplingParams,
+        lora_request: Optional[LoRARequest] = None,
     ) -> SequenceGroupMetadata:
         """Create a single target SequenceGroupMetadata.
 
@@ -378,7 +382,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             block_tables={
                 target_seq_id: seq_group_metadata.block_tables[seq_id],
             },
-            lora_request=None,
+            lora_request=lora_request,
             token_chunk_size=1,
         )
 

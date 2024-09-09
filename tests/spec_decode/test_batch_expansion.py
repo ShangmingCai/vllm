@@ -87,6 +87,7 @@ def test_create_single_target_seq_group_metadata(k: int):
         target_seq_id,
         token_ids,
         input_seq_group_metadata.sampling_params,
+        input_seq_group_metadata.lora_request,
     )
 
     assert output.request_id == input_seq_group_metadata.request_id
@@ -99,3 +100,4 @@ def test_create_single_target_seq_group_metadata(k: int):
     assert len(output.block_tables) == 1
     assert output.block_tables[
         target_seq_id] == input_seq_group_metadata.block_tables[input_seq_id]
+    assert output.lora_request == input_seq_group_metadata.lora_request
