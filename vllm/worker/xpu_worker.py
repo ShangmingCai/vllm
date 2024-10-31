@@ -9,14 +9,14 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.utils import is_xpu
+from vllm.platforms import current_platform
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
@@ -46,14 +46,13 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         assert device_config.device_type == "xpu"
-        assert is_xpu()
+        assert current_platform.is_xpu()
 
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -73,8 +72,6 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             assert rank % parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
 
-        self.multimodal_config = multimodal_config
-
         self.model_runner = XPUModelRunner(  # type: ignore
             model_config,
             parallel_config,
@@ -85,7 +82,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            multimodal_config=multimodal_config,
+            observability_config=self.observability_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -93,7 +90,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:
-        if self.device_config.device.type == "xpu" and is_xpu():
+        if self.device_config.device.type == "xpu" and current_platform.is_xpu(
+        ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             torch.xpu.set_device(self.device)
             torch.xpu.empty_cache()
@@ -184,11 +182,10 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             # use sockets as default Level zero IPC exchange backend. By
             # default oneccl will use `drmfd` as mechanism which need extra
             # dependency (libdrm and drm headers) on your system.
-            ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
-                                                "sockets")
+            ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
             ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                              str(parallel_config.world_size))
-            os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
+            os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
             os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
             os.environ["LOCAL_RANK"] = str(self.local_rank)
             init_distributed_environment(
@@ -201,3 +198,5 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+        # global all_reduce needed for overall oneccl warm up
+        torch.distributed.all_reduce(torch.zeros(1).xpu())

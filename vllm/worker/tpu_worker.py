@@ -102,8 +102,9 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
+        rank = xr.global_ordinal()
         per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{self.rank}")
+                                     f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
@@ -114,7 +115,15 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
 
-        kv_caches = [(None, None) for _ in range(num_layers)]
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [(torch.tensor([], dtype=torch.float32,
+                                   device=self.device),
+                      torch.tensor([], dtype=torch.float32,
+                                   device=self.device))
+                     for _ in range(num_layers)]
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
@@ -124,18 +133,19 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
-        dtype_btyes = get_dtype_size(self.cache_dtype)
-        block_size = self.cache_config.block_size
-        block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
-                            head_size * num_kv_heads)
-
-        # Calculate the TPU KV cache size based on profiling.
+        # Get the maximum amount of memory used by the model weights and
+        # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
+        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+
+        # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
-        profiled = m["bytes_used"]  # Weights + intermediate activations.
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size_bytes = (dtype_btyes * self.cache_config.block_size *
+                            num_layers * 2 * head_size * num_kv_heads)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
