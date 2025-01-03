@@ -1,3 +1,4 @@
+import itertools
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
@@ -13,11 +14,14 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+# yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           BlockQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
                                            RowvLLMParameter)
+# yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -41,12 +45,12 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
-                                   qkv_offsets: Dict[str, Tuple[int, int]],
+                                   shard_offsets: Dict[str, Tuple[int, int]],
                                    loaded_shard_id: str) -> Tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
-    total, _ = qkv_offsets["total"]
-    orig_offset, orig_size = qkv_offsets[loaded_shard_id]
+    total, _ = shard_offsets["total"]
+    orig_offset, orig_size = shard_offsets[loaded_shard_id]
 
     quantized_total = param.data.shape[0]
     quantized_offset = orig_offset * quantized_total // total
@@ -499,9 +503,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
+
                 if use_bitsandbytes_4bit:
-                    shard_size = loaded_weight.shape[output_dim] // 2
-                    shard_offset = shard_size * shard_id
+                    index = list(itertools.accumulate([0] + self.output_sizes))
+                    orig_offsets = {
+                        str(i): (index[i], size)
+                        for i, size in enumerate(self.output_sizes)
+                    }
+                    orig_offsets["total"] = (self.output_size, 0)
+                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
+                        param, orig_offsets, str(shard_id))
+
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
@@ -614,8 +626,24 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         tp_size = get_tensor_model_parallel_world_size()
-        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
-        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+
+        if isinstance(param, BlockQuantScaleParameter):
+            from vllm.model_executor.layers.quantization.fp8 import (
+                Fp8LinearMethod, Fp8MoEMethod)
+            assert self.quant_method is not None
+            assert isinstance(self.quant_method,
+                              (Fp8LinearMethod, Fp8MoEMethod))
+            weight_block_size = self.quant_method.quant_config.weight_block_size
+            assert weight_block_size is not None
+            block_n, _ = weight_block_size[0], weight_block_size[1]
+            shard_offset = (
+                (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
+                block_n) // tp_size
+            shard_size = ((self.output_sizes[loaded_shard_id] + block_n - 1) //
+                          block_n // tp_size)
+        else:
+            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+            shard_size = self.output_sizes[loaded_shard_id] // tp_size
 
         param.load_merged_column_weight(loaded_weight=loaded_weight,
                                         shard_id=loaded_shard_id,
