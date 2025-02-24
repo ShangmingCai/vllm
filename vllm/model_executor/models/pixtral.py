@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from dataclasses import dataclass, fields
 from functools import cached_property
@@ -30,15 +32,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   resolve_visual_encoder_outputs)
+from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
@@ -48,22 +49,21 @@ except ImportError:
 
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
     mm_encoder = tokenizer.instruct.mm_encoder
 
-    max_image_size = mm_encoder.mm_config.max_image_size
-    image_patch_size = mm_encoder.mm_config.image_patch_size
+    image_config = mm_encoder.mm_config if hasattr(
+        mm_encoder, "mm_config") else mm_encoder.image_config
+
+    max_image_size = image_config.max_image_size
+    image_patch_size = image_config.image_patch_size
 
     return ((max_image_size // image_patch_size)**2)
 
 
 def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
                            mm_counts: Mapping[str, int]):
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
@@ -105,9 +105,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
         MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     data_list = data if isinstance(data, list) else [data]
 
@@ -134,9 +132,7 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     prompt_token_ids = inputs.get("prompt_token_ids")
     prompt = inputs.get("prompt")
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
@@ -774,7 +770,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
     ) -> int:
         return get_pixtral_hf_image_feature_size(
             image_size=self.vision_config.image_size,
-            patch_size=self.get_image_size(),
+            patch_size=self.vision_config.patch_size,
         )
 
     def get_max_image_tokens(self) -> int:
@@ -965,7 +961,7 @@ class PixtralHFTransformer(nn.Module):
         position_embeddings: torch.Tensor,
         return_all_hidden_states: bool,
     ) -> torch.Tensor:
-        hidden_states_pool = []
+        hidden_states_pool = [x]
 
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)

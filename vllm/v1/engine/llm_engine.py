@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+import vllm.envs as envs
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -18,7 +20,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -42,7 +44,16 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+
+        # important: init dp group before init the engine_core
+        self.parallel_config = vllm_config.parallel_config
+        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.dp_enabled:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -60,13 +71,9 @@ class LLMEngine:
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
-        )
+        # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
+        self.output_processor = OutputProcessor(self.tokenizer,
+                                                log_stats=False)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -74,8 +81,12 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            log_stats=False,  # FIXME: implement
         )
+
+        if not multiprocess_mode:
+            # for v0 compatibility
+            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
     @classmethod
     def from_engine_args(
@@ -91,7 +102,7 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
-        if VLLM_ENABLE_V1_MULTIPROCESSING:
+        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
@@ -104,10 +115,20 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
+        return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
+        has_unfinished = self.output_processor.has_unfinished_requests()
+        if not self.dp_enabled:
+            return has_unfinished
+        return self.has_unfinished_requests_dp(has_unfinished)
+
+    def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
+        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -117,7 +138,7 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         self.engine_core.abort_requests(request_ids)
-        self.detokenizer.abort_requests(request_ids)
+        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -138,26 +159,30 @@ class LLMEngine:
                                                 prompt_adapter_request,
                                                 priority)
 
-        # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(request)
+        # 2) Make a new RequestState and queue.
+        self.output_processor.add_request(request)
 
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
 
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            self.engine_core.execute_dummy_batch()
+            return []
+
         # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        outputs = self.engine_core.get_output()
 
-        # 2) Detokenizer the EngineCoreOutput.
-        request_outputs, requests_to_abort = self.detokenizer.step(
-            engine_core_outputs)
+        # 2) Process EngineCoreOutputs.
+        processed_outputs = self.output_processor.process_outputs(
+            outputs.outputs)
 
-        # 3) Abort requests that finished due to stopping criteria.
-        if requests_to_abort:
-            self.abort_request(requests_to_abort)
+        # 3) Abort any reqs that finished due to stop strings.
+        self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        return request_outputs
+        return processed_outputs.request_outputs
 
     def get_model_config(self):
         return self.model_config
@@ -167,6 +192,15 @@ class LLMEngine:
 
     def stop_profile(self):
         self.engine_core.profile(False)
+
+    def reset_prefix_cache(self):
+        self.engine_core.reset_prefix_cache()
+
+    def sleep(self, level: int = 1):
+        self.engine_core.sleep(level)
+
+    def wake_up(self):
+        self.engine_core.wake_up()
 
     def get_tokenizer_group(
         self,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
@@ -326,16 +328,6 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
     }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "wqkv",
-        "wo",
-        "gate_up_proj",
-        "w2",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self,
                  *,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2024 The ModelBest team.
@@ -223,28 +225,6 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
             "gate_proj",
             "up_proj",
         ],
-    }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "kv_a_proj_with_mqa",
-        "q_a_proj",
-        "q_b_proj",
-        "kv_b_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "embed_tokens",
-        "lm_head",
-    ]
-
-    # `embedding_modules` and `embedding_padding_modules`
-    # are inherited from MiniCPMForCausalLM
-
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
     }
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
