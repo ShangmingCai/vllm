@@ -72,16 +72,19 @@ class MooncakeStore(KVLookupBufferBase):
                 "to run vLLM with MooncakeConnector.") from e
 
         try:
-            self.store = MooncakeDistributedStore()
-            self.config = MooncakeStoreConfig.load_from_env()
-            logger.info("Mooncake Configuration loaded successfully.")
+            # self.store = MooncakeDistributedStore()
+            # self.config = MooncakeStoreConfig.load_from_env()
+            # logger.info("Mooncake Configuration loaded successfully.")
 
-            self.store.setup(self.config.local_hostname,
-                             self.config.metadata_server,
-                             self.config.global_segment_size,
-                             self.config.local_buffer_size,
-                             self.config.protocol, self.config.device_name,
-                             self.config.master_server_address)
+            # self.store.setup(self.config.local_hostname,
+            #                  self.config.metadata_server,
+            #                  self.config.global_segment_size,
+            #                  self.config.local_buffer_size,
+            #                  self.config.protocol, self.config.device_name,
+            #                  self.config.master_server_address)
+            import redis
+            self.store = redis.StrictRedis.from_url("redis://127.0.0.1:6379")
+
 
         except ValueError as e:
             logger.error(e)
@@ -137,14 +140,14 @@ class MooncakeStore(KVLookupBufferBase):
     ) -> None:
         # submit asynchronous put thread
         if value is not None:
-            self.put_submit_thread.submit(self._put_impl, key, value)
+            self._put_impl(key, value)
 
     def get(
         self,
         key: str,
     ) -> Optional[torch.Tensor]:
         # submit asynchronous get thread
-        value = self.get_submit_thread.submit(self._get_impl, key).result()
+        value = self._get_impl(key)
         return value
 
     def _put_impl(
@@ -155,7 +158,7 @@ class MooncakeStore(KVLookupBufferBase):
         """Put KVCache to Mooncake Store"""
         value_bytes = pickle.dumps(value)
         try:
-            self.store.put(key, value_bytes)
+            self.store.set(key, value_bytes)
         except TypeError as err:
             raise TypeError("Mooncake Store Put Type Error.") from err
 
