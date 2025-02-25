@@ -126,6 +126,8 @@ class MooncakeStore(KVLookupBufferBase):
         return [remote_kv, hidden, roi]
 
     def close(self):
+        # MooncakeDistributedStore will automatically call the destructor, so
+        # we do not need to close it manually.
         pass
 
     def put(
