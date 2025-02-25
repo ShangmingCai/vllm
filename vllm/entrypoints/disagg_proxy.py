@@ -2,6 +2,7 @@ import argparse
 import copy
 import ipaddress
 import itertools
+import json
 import logging
 import os
 import threading
@@ -11,11 +12,11 @@ from typing import List, Optional
 import aiohttp
 import requests
 import uvicorn
-from fastapi import APIRouter, FastAPI, Depends, Request
-from fastapi.responses import StreamingResponse,JSONResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from transformers import AutoTokenizer
-from vllm.entrypoints.utils import with_cancellation
 
+from vllm.entrypoints.utils import with_cancellation
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -49,21 +50,46 @@ async def validate_json_request(raw_request: Request):
 
 router = APIRouter()
 
-async def forward_request(url, data):
+
+async def forward_request(url, data, use_chunked=True):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
-        async with session.post(url=url, json=data,
-                                headers=headers) as response:
-            if response.status == 200:
-                if True:
-                    async for chunk_bytes in response.content.iter_chunked(
-                            1024):
-                        yield chunk_bytes
+        try:
+            async with session.post(url=url, json=data,
+                                    headers=headers) as response:
+                if 200 <= response.status < 300 or 400 <= response.status < 500:
+                    if use_chunked:
+                        async for chunk_bytes in response.content.iter_chunked(
+                                1024):
+                            yield chunk_bytes
+                    else:
+                        content = await response.read()
+                        yield content
                 else:
-                    content = await response.read()
-                    yield content
+                    error_content = await response.text()
+                    try:
+                        error_content = json.loads(error_content)
+                    except json.JSONDecodeError:
+                        error_content = error_content
+                    logger.error(
+                        f"Request failed with status {response.status}: {error_content}"
+                    )
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=
+                        f"Request failed with status {response.status}: {error_content}"
+                    )
+        except aiohttp.ClientError as e:
+            logger.error(f"ClientError occurred: {str(e)}")
+            raise HTTPException(
+                status_code=502,
+                detail="Bad Gateway: Error communicating with upstream server."
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 def calculate_id_and_prefix_hash(prompt):
@@ -86,6 +112,7 @@ def get_ids_and_tokens_from_prompts(prompt):
         return prompts_ids, all_keys
     else:
         return calculate_id_and_prefix_hash(prompt)
+
 
 @with_cancellation
 @router.post('/v1/completions', dependencies=[Depends(validate_json_request)])
@@ -122,6 +149,8 @@ async def create_completion(raw_request: Request):
             + decode_instance + '/v1/completions', request)
         response = StreamingResponse(generator)
         return response
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception:
         import sys
         exc_info = sys.exc_info()
@@ -129,7 +158,8 @@ async def create_completion(raw_request: Request):
         print(exc_info)
 
 
-@router.post('/v1/chat/completions', dependencies=[Depends(validate_json_request)])
+@router.post('/v1/chat/completions',
+             dependencies=[Depends(validate_json_request)])
 async def create_chat_completion(raw_request: Request):
     try:
         request = await raw_request.json()
@@ -161,14 +191,17 @@ async def create_chat_completion(raw_request: Request):
         request["kv_transfer_params"] = kv_transfer_params
         generator = forward_request('http://'\
             + decode_instance + '/v1/chat/completions', request)
-        response = StreamingResponse(generator)
+        response = StreamingResponse(content=generator)
         return response
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception:
         import sys
         exc_info = sys.exc_info()
         print('Error occurred in disagg proxy server')
         print(exc_info)
-        return JSONResponse(content=generator.model_dump())
+        return StreamingResponse(content=exc_info,
+                                 media_type="text/event-stream")
 
 
 def run_server(args, **uvicorn_kwargs) -> None:
@@ -241,36 +274,28 @@ def validate_parsed_serve_args(args: Namespace):
 if __name__ == '__main__':
     # Todo: allow more config
     parser = argparse.ArgumentParser('vLLM disaggregated proxy server.')
-    parser.add_argument(
-        '--model',
-        '-m',
-        type=str,
-        required=True,
-        help='Model name'
-    )
+    parser.add_argument('--model',
+                        '-m',
+                        type=str,
+                        required=True,
+                        help='Model name')
 
-    parser.add_argument(
-        '--prefill',
-        '-p',
-        type=str,
-        nargs='+',
-        help='List of prefill node URLs (host:port)'
-    )
+    parser.add_argument('--prefill',
+                        '-p',
+                        type=str,
+                        nargs='+',
+                        help='List of prefill node URLs (host:port)')
 
-    parser.add_argument(
-        '--decode',
-        '-d',
-        type=str,
-        nargs='+',
-        help='List of decode node URLs (host:port)'
-    )
+    parser.add_argument('--decode',
+                        '-d',
+                        type=str,
+                        nargs='+',
+                        help='List of decode node URLs (host:port)')
 
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=8000, 
-        help='Server port number'
-    )
+    parser.add_argument('--port',
+                        type=int,
+                        default=8000,
+                        help='Server port number')
     args = parser.parse_args()
     validate_parsed_serve_args(args)
     run_server(args)

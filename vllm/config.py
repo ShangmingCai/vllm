@@ -2728,7 +2728,7 @@ class KVTransferConfig(BaseModel):
     def need_kv_parallel_group(self) -> bool:
         # for those database-based connector, vLLM does not need to create
         # parallel group, and in that case the kv parallel size will be 1.
-        return self.kv_connector is not None and self.kv_parallel_size > 1
+        return self.kv_connector is not None
 
     @property
     def is_kv_producer(self) -> bool:
