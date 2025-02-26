@@ -79,8 +79,9 @@ class KVStoreConnector(KVConnectorBase):
         num_attention_heads = model_config.num_attention_heads
         head_size = int(hidden_size / num_attention_heads)
 
-        # get store keys from model_input
+        # get info from kv_transfer_params
         store_keys_list = model_input.kv_transfer_params.kvcache_store_keys
+        prefix_ids_list = model_input.kv_transfer_params.prefix_prompt_ids
 
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
@@ -103,11 +104,16 @@ class KVStoreConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
 
-            # get store keys from model_input
+            # get store keys prefix for current seq
             store_keys_prefix = store_keys_list[idx][0]
+
+            # get roi for current seq
+            prefix_ids = torch.tensor(prefix_ids_list[idx], dtype=int)
+            roi = torch.ones_like(prefix_ids, dtype=bool)
+
             self.kv_store.insert(
-                current_tokens, torch.ones_like(current_tokens, dtype=bool),
-                keys, values, hidden_or_intermediate_states[start_pos:end_pos],
+                current_tokens, roi, keys, values,
+                hidden_or_intermediate_states[start_pos:end_pos],
                 store_keys_prefix, self.local_tp_rank)
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
@@ -128,6 +134,7 @@ class KVStoreConnector(KVConnectorBase):
 
         # get info from kv_transfer_params
         load_keys_list = model_input.kv_transfer_params.kvcache_load_keys
+        prefix_ids_list = model_input.kv_transfer_params.prefix_prompt_ids
 
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
@@ -135,18 +142,23 @@ class KVStoreConnector(KVConnectorBase):
             current_tokens = input_tokens_tensor[start_pos:end_pos]
             num_tokens = slen
 
-            # get prefix name
+            # get load keys prefix for current seq
             load_keys_prefix = load_keys_list[idx][0]
 
-            ret = self.kv_store.drop_select(
-                current_tokens, torch.ones_like(current_tokens, dtype=bool),
-                load_keys_prefix, self.local_tp_rank)
+            # get roi for current seq
+            prefix_ids = torch.tensor(prefix_ids_list[idx], dtype=int)
+            roi = torch.ones_like(prefix_ids, dtype=bool)
+
+            ret = self.kv_store.drop_select(current_tokens, roi,
+                                            load_keys_prefix,
+                                            self.local_tp_rank)
+
             if ret[0] is None:
                 # didn't find any match.
                 bypass_model_exec = False
                 continue
 
-            remote_kv, hidden, roi = ret[0], ret[1], ret[2]
+            remote_kv, hidden = ret[0], ret[1]
             num_computed_tokens = roi.shape[0]
 
             # check if both KV cache and the hidden states are received
