@@ -8,7 +8,6 @@ from this remote lookup buffer.
 import json
 import os
 import pickle
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -91,38 +90,35 @@ class MooncakeStore(KVLookupBufferBase):
                 "An error occurred while loading the configuration: %s", exc)
             raise
 
-        self.put_submit_thread = ThreadPoolExecutor(max_workers=1)
-        self.get_submit_thread = ThreadPoolExecutor(max_workers=1)
-
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor, hidden: torch.Tensor,
                store_keys_prefix: str, tp_rank: int) -> None:
 
         kvcache_to_sent = torch.stack((key, value), dim=0)
         # send kvcache with store keys from model_input
-        store_keys = store_keys_prefix + "_" + str(tp_rank)
+        store_keys = f"{store_keys_prefix}_{tp_rank}"
         self.put(store_keys, kvcache_to_sent)
 
         # call self.kv_store to put hidden_or_intermediate_states
-        tmp_keys = store_keys_prefix + "_" + "hidden" + "_" + str(tp_rank)
-        self.put(tmp_keys, hidden)
+        hidden_key = f"{store_keys_prefix}_hidden_{tp_rank}"
+        self.put(hidden_key, hidden)
 
         # call self.kv_store to put hidden_or_intermediate_states
-        tmp_keys = store_keys_prefix + "_" + "roi" + "_" + str(tp_rank)
-        self.put(tmp_keys, roi)
+        roi_key = f"{store_keys_prefix}_roi_{tp_rank}"
+        self.put(roi_key, roi)
         return
 
     def drop_select(self, input_tokens: Optional[torch.Tensor],
                     roi: Optional[torch.Tensor], load_keys_prefix: str,
                     tp_rank: int) -> List[Optional[torch.Tensor]]:
-        load_keys = load_keys_prefix + "_" + str(tp_rank)
+        load_keys = f"{load_keys_prefix}_{tp_rank}"
         remote_kv = self.get(load_keys)
         # call self.kv_store to put hidden_or_intermediate_states
-        tmp_keys = load_keys_prefix + "_" + "hidden" + "_" + str(tp_rank)
-        hidden = self.get(tmp_keys)
+        hidden_key = f"{load_keys_prefix}_hidden_{tp_rank}"
+        hidden = self.get(hidden_key)
 
-        tmp_keys = load_keys_prefix + "_" + "roi" + "_" + str(tp_rank)
-        roi = self.get(tmp_keys)
+        roi_key = f"{load_keys_prefix}_roi_{tp_rank}"
+        roi = self.get(roi_key)
         return [remote_kv, hidden, roi]
 
     def close(self):
