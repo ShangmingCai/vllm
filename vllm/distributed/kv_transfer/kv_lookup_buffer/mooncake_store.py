@@ -3,7 +3,7 @@
 This file contains a new class `MooncakeStore` that allows developers to
 think of KV cache transfer operations as put new KV cache entries (`insert`)
 into a remote KVStore-based lookup buffer and querying existing KV caches
-(``)from this remote lookup buffer.
+(`drop_select`) from this remote lookup buffer.
 """
 import json
 import os
@@ -83,7 +83,7 @@ class MooncakeStore(KVLookupBufferBase):
                              self.config.master_server_address)
 
         except ValueError as e:
-            logger.error(e)
+            logger.error("Configuration loading failed: %s", e)
             raise
         except Exception as exc:
             logger.error(
@@ -152,6 +152,7 @@ class MooncakeStore(KVLookupBufferBase):
         try:
             self.store.put(key, value_bytes)
         except TypeError as err:
+            logger.error("Failed to put value into Mooncake Store: %s", err)
             raise TypeError("Mooncake Store Put Type Error.") from err
 
     def _get_impl(
@@ -164,6 +165,7 @@ class MooncakeStore(KVLookupBufferBase):
             if data:
                 return pickle.loads(data)
         except TypeError as err:
+            logger.error("Failed to get value from Mooncake Store: %s", err)
             raise TypeError("Mooncake Store Get Type Error.") from err
 
         return None
