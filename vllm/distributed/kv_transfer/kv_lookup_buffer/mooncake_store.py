@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This file contains a new class `MooncakeStore` that allows developers to 
-think of KV cache transfer operations as put new KV cache entries (`insert`) 
+This file contains a new class `MooncakeStore` that allows developers to
+think of KV cache transfer operations as put new KV cache entries (`insert`)
 into a remote KVStore-based lookup buffer and querying existing KV caches
-from this remote lookup buffer.
+(``)from this remote lookup buffer.
 """
 import json
 import os
@@ -95,15 +95,13 @@ class MooncakeStore(KVLookupBufferBase):
                store_keys_prefix: str, tp_rank: int) -> None:
 
         kvcache_to_sent = torch.stack((key, value), dim=0)
-        # send kvcache with store keys from model_input
+
         store_keys = f"{store_keys_prefix}_{tp_rank}"
         self.put(store_keys, kvcache_to_sent)
 
-        # call self.kv_store to put hidden_or_intermediate_states
         hidden_key = f"{store_keys_prefix}_hidden_{tp_rank}"
         self.put(hidden_key, hidden)
 
-        # call self.kv_store to put hidden_or_intermediate_states
         roi_key = f"{store_keys_prefix}_roi_{tp_rank}"
         self.put(roi_key, roi)
         return
@@ -111,9 +109,10 @@ class MooncakeStore(KVLookupBufferBase):
     def drop_select(self, input_tokens: Optional[torch.Tensor],
                     roi: Optional[torch.Tensor], load_keys_prefix: str,
                     tp_rank: int) -> List[Optional[torch.Tensor]]:
+
         load_keys = f"{load_keys_prefix}_{tp_rank}"
         remote_kv = self.get(load_keys)
-        # call self.kv_store to put hidden_or_intermediate_states
+
         hidden_key = f"{load_keys_prefix}_hidden_{tp_rank}"
         hidden = self.get(hidden_key)
 
@@ -123,7 +122,7 @@ class MooncakeStore(KVLookupBufferBase):
 
     def close(self):
         # MooncakeDistributedStore will automatically call the destructor, so
-        # we do not need to close it manually.
+        # it is unnecessary to close it manually.
         pass
 
     def put(
@@ -131,7 +130,7 @@ class MooncakeStore(KVLookupBufferBase):
         key: str,
         value: Optional[torch.Tensor],
     ) -> None:
-        # submit asynchronous put thread
+        # A message queue needs to be introduced before making it asynchronous.
         if value is not None:
             self._put_impl(key, value)
 
@@ -139,7 +138,7 @@ class MooncakeStore(KVLookupBufferBase):
         self,
         key: str,
     ) -> Optional[torch.Tensor]:
-        # submit asynchronous get thread
+        # A message queue needs to be introduced before making it asynchronous.
         value = self._get_impl(key)
         return value
 
