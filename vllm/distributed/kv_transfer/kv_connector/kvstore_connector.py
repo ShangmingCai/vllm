@@ -77,6 +77,7 @@ class KVStoreConnector(KVConnectorBase):
     ) -> None:
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
+        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
@@ -94,6 +95,19 @@ class KVStoreConnector(KVConnectorBase):
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
+
+            f start_pos >= num_prefill_tokens:
+                # This can happen during inflight batching. See:
+                # vllm/worker/model_runner.py::_prepare_model_input_tensors:
+                # - input_tokens[:num_prefill_tokens] contains prefill tokens.
+                # - input_tokens[num_prefill_tokens:] contains decode tokens.
+                logger.warning("You should set --enable_chunked_prefill=False "
+                               "and --max_num_batched_tokens "
+                               "should be equal to max_seq_len_to_capture")
+                bypass_model_exec = False
+                assert start_pos == num_prefill_tokens
+                break
+
             current_tokens = input_tokens_tensor[start_pos:end_pos]
 
             keys, values = [], []
@@ -203,7 +217,7 @@ class KVStoreConnector(KVConnectorBase):
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
         if not bypass_model_exec:
-            logger.debug(
+            logger.warning(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
             hidden_or_intermediate_states = None
